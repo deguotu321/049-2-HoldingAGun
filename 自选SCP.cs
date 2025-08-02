@@ -1,365 +1,412 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Linq;
 using Exiled.API.Enums;
 using Exiled.API.Features;
+using Exiled.API.Features.Items;
 using Exiled.API.Interfaces;
 using Exiled.Events.EventArgs.Player;
-using Exiled.Events.EventArgs.Server;
-using MEC;
+using Exiled.Events.EventArgs.Scp049;
 using PlayerRoles;
 using UnityEngine;
+using MEC;
+using System.Linq;
 
-namespace EpsilonRealityStabilizer
+namespace Scp0492Abilities
 {
-    public class EpsilonRealityStabilizer : Plugin<Config>
+    public class ZombieAbilities : Plugin<ZombieAbilities.PluginConfig>
     {
-        public override string Author => "SCP基金会现实科学部";
-        public override string Name => "艾普西龙现实稳定系统";
-        public override string Prefix => "EPSILON-STABILIZER";
-        public override Version Version => new Version(5, 13, 5);
-        public override Version RequiredExiledVersion => new Version(8, 9, 11);
+        public override string Name { get; } = "SCP-049-2 Abilities";
+        public override string Author { get; } = "YourName";
+        public override Version Version { get { return new Version(2, 2, 0); } }
+        public override Version RequiredExiledVersion { get { return new Version(8, 9, 11); } }
 
-        public static EpsilonRealityStabilizer Instance;
+        private readonly Dictionary<Player, DateTime> _disguiseCooldown = new Dictionary<Player, DateTime>();
+        private readonly Dictionary<Player, string> _originalCustomInfo = new Dictionary<Player, string>();
+        private readonly Dictionary<Player, CoroutineHandle> _weaponCheckCoroutines = new Dictionary<Player, CoroutineHandle>();
 
-        private CoroutineHandle _countdownCoroutine;
-        private float _remainingTime;
-        private bool _isStabilizerActive;
-        private int _lastBroadcastSecond = -1;
-
-        private DateTime _lastDamageNotification = DateTime.MinValue;
-
-        private readonly Dictionary<RoomType, string> _chineseRoomNames = new Dictionary<RoomType, string>
+        public class PluginConfig : IConfig
         {
-            // 轻收容
-            { RoomType.LczArmory, "轻收容军械库" },
-            { RoomType.LczCafe, "轻收容餐厅" },
-            { RoomType.LczPlants, "温室" },
-            { RoomType.LczToilets, "洗手间" },
-            { RoomType.Lcz173, "SCP-173收容室" },
-            { RoomType.LczClassDSpawn, "D级人员宿舍" },
-            { RoomType.LczCheckpointA, "检查点A" },
-            { RoomType.LczCheckpointB, "检查点B" },
-            { RoomType.LczGlassBox, "玻璃房" },
-            { RoomType.Lcz914, "SCP-914房间" },
-            { RoomType.Lcz330, "SCP-330糖果机" },
+            [Description("Whether the plugin is enabled")]
+            public bool IsEnabled { get; set; } = true;
 
-            // 重收容
-            { RoomType.Hcz049, "SCP-049收容室" },
-            { RoomType.Hcz079, "SCP-079主控室" },
-            { RoomType.Hcz106, "SCP-106收容室" },
-            { RoomType.Hcz939, "SCP-939收容室" },
-            { RoomType.HczNuke, "核弹井" },
-            { RoomType.HczCrossing, "十字路口" },
-            { RoomType.HczTestRoom, "测试房间" },
-            { RoomType.Hcz096, "SCP-096收容室" },
-            { RoomType.HczServerRoom, "服务器室" },
-            { RoomType.HczArmory, "重收容军械库" },
-            { RoomType.HczHid, "HID" },
+            [Description("Whether debug mode is enabled")]
+            public bool Debug { get; set; } = false;
 
-            // 入口区
-            { RoomType.EzVent, "通风管道" },
-            { RoomType.EzGateA, "大门A" },
-            { RoomType.EzGateB, "大门B" },
-            { RoomType.EzCollapsedTunnel, "坍塌隧道" },
-            { RoomType.EzIntercom, "对讲机室" },
-            { RoomType.EzDownstairsPcs, "办公室" },
-            { RoomType.EzUpstairsPcs, "上层办公室" },
-            { RoomType.EzCrossing, "检查点走廊" },
-            { RoomType.EzShelter, "避难所" },
+            [Description("Hint display duration (seconds)")]
+            public float DisplayDuration { get; set; } = 8f;
 
-            // 其他
-            { RoomType.Pocket, "口袋维度" },
-            { RoomType.Surface, "地表" },
-            { RoomType.HczElevatorA, "重收容电梯A" },
-            { RoomType.HczElevatorB, "重收容电梯B" }
-        };
+            [Description("Hint position (number of top lines)")]
+            public int TopLines { get; set; } = 3;
+
+            [Description("SCP-049-2 shield value")]
+            public int ZombieShield { get; set; } = 800;
+
+            [Description("SCP-049-2 health value")]
+            public int ZombieHealth { get; set; } = 49;
+
+            [Description("Max health increase when healing SCP-049")]
+            public int HealHpIncrease { get; set; } = 25;
+
+            [Description("Health restored when healing SCP-049")]
+            public int HealAmount { get; set; } = 30;
+
+            [Description("Weapon equipped by SCP-049-2")]
+            public ItemType ZombieWeapon { get; set; } = ItemType.GunFSP9;
+
+            [Description("Disguise item type")]
+            public ItemType DisguiseItem { get; set; } = ItemType.Coin;
+
+            [Description("Disguise duration (seconds)")]
+            public float DisguiseDuration { get; set; } = 30f;
+
+            [Description("Disguise cooldown time (seconds)")]
+            public float DisguiseCooldown { get; set; } = 60f;
+
+            [Description("Weapon check interval (seconds)")]
+            public float WeaponCheckInterval { get; set; } = 0.5f;
+        }
 
         public override void OnEnabled()
         {
-            Instance = this;
-
-            Exiled.Events.Handlers.Server.RoundStarted += OnRoundStarted;
-            Exiled.Events.Handlers.Player.Died += OnPlayerDied;
-            Exiled.Events.Handlers.Player.Hurting += OnPlayerHurting;
-            Exiled.Events.Handlers.Server.RoundEnded += OnRoundEnded;
-
-            Log.Info("艾普西龙现实稳定系统已加载 - 授权级别: OMEGA");
+            Exiled.Events.Handlers.Player.ChangingRole += OnChangingRole;
+            Exiled.Events.Handlers.Scp049.Attacking += OnAttacking;
+            Exiled.Events.Handlers.Player.Dying += OnDying;
+            Exiled.Events.Handlers.Player.Hurting += OnHurting;
+            Exiled.Events.Handlers.Player.UsingItem += OnUsingItem;
+            Exiled.Events.Handlers.Player.DroppingItem += OnDroppingItem;
+            Exiled.Events.Handlers.Player.Died += OnDied;
+            Exiled.Events.Handlers.Player.ChangedItem += OnChangedItem;
             base.OnEnabled();
         }
 
         public override void OnDisabled()
         {
-            Exiled.Events.Handlers.Server.RoundStarted -= OnRoundStarted;
-            Exiled.Events.Handlers.Player.Died -= OnPlayerDied;
-            Exiled.Events.Handlers.Player.Hurting -= OnPlayerHurting;
-            Exiled.Events.Handlers.Server.RoundEnded -= OnRoundEnded;
+            Exiled.Events.Handlers.Player.ChangingRole -= OnChangingRole;
+            Exiled.Events.Handlers.Scp049.Attacking -= OnAttacking;
+            Exiled.Events.Handlers.Player.Dying -= OnDying;
+            Exiled.Events.Handlers.Player.Hurting -= OnHurting;
+            Exiled.Events.Handlers.Player.UsingItem -= OnUsingItem;
+            Exiled.Events.Handlers.Player.DroppingItem -= OnDroppingItem;
+            Exiled.Events.Handlers.Player.Died -= OnDied;
+            Exiled.Events.Handlers.Player.ChangedItem -= OnChangedItem;
 
-            if (_countdownCoroutine.IsRunning)
-                Timing.KillCoroutines(_countdownCoroutine);
-
-            Instance = null;
+            // Stop all coroutines
+            foreach (var coroutine in _weaponCheckCoroutines.Values)
+            {
+                Timing.KillCoroutines(coroutine);
+            }
+            _weaponCheckCoroutines.Clear();
+            _disguiseCooldown.Clear();
             base.OnDisabled();
         }
 
-        private void OnRoundStarted()
+        private void OnChangedItem(ChangedItemEventArgs ev)
         {
-            // 随机初始时间 (160-280秒)
-            _remainingTime = UnityEngine.Random.Range(Config.MinInitialDuration, Config.MaxInitialDuration);
-            _isStabilizerActive = true;
-            _lastBroadcastSecond = -1;
-
-            _countdownCoroutine = Timing.RunCoroutine(CountdownCoroutine());
-
-            Timing.CallDelayed(3f, () =>
-            {
-                string message =
-                    $"<size=30><color=#3498DB>■ <color=#2E86C1>基金会通知</color> ■</color></size>\n" +
-                    $"<size=25><color=#85C1E9>艾普西龙级现实稳定系统已激活</color></size>\n" +
-                    $"<size=25><color=#F1C40F>稳定持续时间: <color=#F39C12>{_remainingTime}秒</color></color></size>\n" +
-                    $"<size=25><color=#AAB7B8>所有人员注意: <color=#E5E7E9>现实异常波动期间禁止非授权活动</color></color></size>";
-
-                ShowGlobalHint(message, 10f);
-            });
-        }
-
-        private void OnRoundEnded(RoundEndedEventArgs ev)
-        {
-            _isStabilizerActive = false;
-            if (_countdownCoroutine.IsRunning)
-                Timing.KillCoroutines(_countdownCoroutine);
-        }
-
-        private void OnPlayerDied(DiedEventArgs ev)
-        {
-            if (!_isStabilizerActive || _remainingTime <= 0) return;
-
-            Timing.CallDelayed(0.5f, () =>
-            {
-                if (!_isStabilizerActive || _remainingTime <= 0) return;
-                if (ev.Player != null && !ev.Player.IsAlive)
-                    StartRespawnCountdown(ev.Player);
-            });
-        }
-
-        private void StartRespawnCountdown(Player player)
-        {
-            var randomRole = GetRandomRole();
-            var spawnZone = GetZoneByRole(randomRole);
-            var spawnRoom = GetRandomRoomInZone(spawnZone);
-            var chineseRoomName = GetChineseRoomName(spawnRoom.Type);
-
-            Timing.RunCoroutine(RespawnCountdownCoroutine(player, randomRole, spawnRoom, chineseRoomName));
-        }
-
-        private IEnumerator<float> RespawnCountdownCoroutine(Player player, RoleTypeId role, Room spawnRoom, string roomName)
-        {
-            float countdown = 5f;
-
-            while (countdown > 0 && _isStabilizerActive && _remainingTime > 0)
-            {
-                if (player != null && player.IsConnected)
-                {
-                    string message =
-                        $"<size=30><color=#27AE60>■ <color=#2ECC71>现实稳定系统</color> ■</color></size>\n" +
-                        $"<size=25><color=#A9DFBF>你将在 <color=#2ECC71>{(int)countdown}秒</color> 后作为<color=#F1C40F>{GetRoleName(role)}</color>复活</color></size>\n" +
-                        $"<size=25><color=#ABEBC6>位置: <color=#27AE60>{roomName}</color></color></size>";
-
-                    player.ShowHint(message, 1.1f);
-                }
-
-                countdown -= 1f;
-                yield return Timing.WaitForSeconds(1f);
-            }
-
-            if (_isStabilizerActive && _remainingTime > 0 && player != null && !player.IsAlive)
-                RespawnPlayer(player, role, spawnRoom);
-        }
-
-        private void OnPlayerHurting(HurtingEventArgs ev)
-        {
-            if (!_isStabilizerActive || _remainingTime <= 0 || ev.Amount <= 0 || ev.Player == null)
-                return;
-
-            if ((DateTime.Now - _lastDamageNotification).TotalSeconds < 2.5f)
-                return;
-
-            _remainingTime = Mathf.Max(0, _remainingTime - 1);
-            _lastDamageNotification = DateTime.Now;
-
-            if (Config.ShowDamageNotifications)
+            // Ensure SCP-049-2 always holds the first item
+            if (ev.Player.Role == RoleTypeId.Scp0492 &&
+                ev.Player.Items.Count > 0 &&
+                ev.Player.CurrentItem != ev.Player.Items.ElementAt(0))
             {
                 Timing.CallDelayed(0.1f, () =>
                 {
-                    string message =
-                        $"<size=30><color=#E74C3C>■ <color=#C0392B>系统警报</color> ■</color></size>\n" +
-                        $"<size=25><color=#EC7063>现实稳定系统受到时空扰动!</color></size>\n" +
-                        $"<size=25><color=#F1948A>持续时间减少: <color=#E74C3C>1秒</color> | 剩余: <color=#F39C12>{_remainingTime}秒</color></color></size>";
-
-                    ShowGlobalHint(message, 3f);
+                    if (ev.Player.IsAlive && ev.Player.Items.Count > 0)
+                        ev.Player.CurrentItem = ev.Player.Items.ElementAt(0);
                 });
             }
         }
 
-        private void RespawnPlayer(Player player, RoleTypeId role, Room spawnRoom)
+        private void OnChangingRole(ChangingRoleEventArgs ev)
         {
-            if (player == null || !_isStabilizerActive || _remainingTime <= 0) return;
+            if (ev.NewRole != RoleTypeId.Scp0492)
+                return;
 
-            player.Role.Set(role, Exiled.API.Enums.SpawnReason.Respawn, RoleSpawnFlags.All);
-            player.Position = spawnRoom.Position + Vector3.up * 2f;
-            player.Health = player.MaxHealth;
+            // Set SCP-049-2 health
+            ev.Player.MaxHealth = Config.ZombieHealth;
+            ev.Player.Health = Config.ZombieHealth;
 
-            if (Config.ShowRespawnNotifications)
+            // Clear existing shield and add new shield
+            ev.Player.ArtificialHealth = 0;
+            ev.Player.ArtificialHealth = Config.ZombieShield;
+
+            // Reset custom info cache
+            if (_originalCustomInfo.ContainsKey(ev.Player))
+                _originalCustomInfo.Remove(ev.Player);
+
+            // Add weapons and disguise items
+            Timing.RunCoroutine(EquipZombieItems(ev.Player));
+
+            // Start weapon check coroutine
+            StartWeaponCheck(ev.Player);
+        }
+
+        private void StartWeaponCheck(Player player)
+        {
+            // If coroutine exists, stop it first
+            if (_weaponCheckCoroutines.ContainsKey(player))
             {
-                Timing.CallDelayed(0.5f, () =>
+                Timing.KillCoroutines(_weaponCheckCoroutines[player]);
+                _weaponCheckCoroutines.Remove(player);
+            }
+
+            // Start new weapon check coroutine
+            var coroutine = Timing.RunCoroutine(WeaponCheckCoroutine(player));
+            _weaponCheckCoroutines[player] = coroutine;
+        }
+
+        private IEnumerator<float> WeaponCheckCoroutine(Player player)
+        {
+            while (player.IsAlive && player.Role == RoleTypeId.Scp0492)
+            {
+                // Check if player has weapon
+                bool hasWeapon = player.Items.Any(item => item.Type == Config.ZombieWeapon);
+
+                // If no weapon, give one and equip it
+                if (!hasWeapon)
                 {
-                    if (player != null && player.IsConnected)
+                    Item weapon = player.AddItem(Config.ZombieWeapon);
+
+                    // Ensure weapon is equipped
+                    if (weapon != null)
                     {
-                        string chineseRoomName = GetChineseRoomName(spawnRoom.Type);
-                        string roleName = GetRoleName(role);
+                        player.CurrentItem = weapon;
 
-                        string message =
-                            $"<size=30><color=#2ECC71>■ <color=#27AE60>人事调整通知</color> ■</color></size>\n" +
-                            $"<size=25><color=#ABEBC6>你已被重新分配到: <color=#F1C40F>{roleName}</color></color></size>\n" +
-                            $"<size=25><color=#A9DFBF>复活位置: <color=#27AE60>{chineseRoomName}</color></color></size>\n" +
-                            $"<size=25><color=#AAB7B8>继续履行基金会职责</color></size>";
+                        if (Config.Debug)
+                            player.ShowHint($"<color=yellow>Weapon automatically replenished and equipped: {Config.ZombieWeapon}</color>", 3f);
+                    }
+                }
 
-                        player.ShowHint(message, 6f);
+                // Ensure player is holding the first item
+                if (player.Items.Count > 0 && player.CurrentItem == null)
+                {
+                    player.CurrentItem = player.Items.ElementAt(0);
+
+                    if (Config.Debug)
+                        player.ShowHint($"<color=yellow>Automatically equipped item: {player.CurrentItem.Type}</color>", 3f);
+                }
+
+                yield return Timing.WaitForSeconds(Config.WeaponCheckInterval);
+            }
+        }
+
+        private IEnumerator<float> EquipZombieItems(Player player)
+        {
+            yield return Timing.WaitForOneFrame;
+
+            try
+            {
+                // Clear existing items
+                player.ClearInventory();
+
+                // Add weapon as default equipment
+                Item weapon = player.AddItem(Config.ZombieWeapon);
+
+                // Add disguise item
+                if (Config.DisguiseItem != ItemType.None)
+                {
+                    player.AddItem(Config.DisguiseItem);
+                }
+
+                // Set default held item to weapon
+                if (weapon != null)
+                {
+                    player.CurrentItem = weapon;
+
+                    if (Config.Debug)
+                        player.ShowHint($"<color=green>Weapon and disguise item equipped</color>\nDefault held: {weapon.Type}", 10f);
+                }
+                else
+                {
+                    if (Config.Debug)
+                        Log.Error($"Failed to add weapon: {Config.ZombieWeapon}");
+                }
+            }
+            catch (Exception e)
+            {
+                if (Config.Debug)
+                    Log.Error($"Error equipping items: {e}");
+            }
+        }
+
+        private void OnDroppingItem(DroppingItemEventArgs ev)
+        {
+            // If SCP-049-2 drops weapon, immediately replenish and equip
+            if (ev.Player.Role == RoleTypeId.Scp0492 && ev.Item.Type == Config.ZombieWeapon)
+            {
+                Timing.CallDelayed(0.1f, () =>
+                {
+                    if (ev.Player.IsAlive && !ev.Player.Items.Any(item => item.Type == Config.ZombieWeapon))
+                    {
+                        Item weapon = ev.Player.AddItem(Config.ZombieWeapon);
+
+                        // Ensure new weapon is equipped
+                        if (weapon != null)
+                        {
+                            ev.Player.CurrentItem = weapon;
+
+                            if (Config.Debug)
+                                ev.Player.ShowHint($"<color=yellow>Dropped weapon automatically replenished and equipped</color>", 3f);
+                        }
                     }
                 });
             }
         }
 
-        private RoleTypeId GetRandomRole()
+        private void OnDied(DiedEventArgs ev)
         {
-            float randomValue = UnityEngine.Random.Range(0f, 100f);
-
-            if (randomValue <= 55f) // D级人员 55%
-                return RoleTypeId.ClassD;
-
-            if (randomValue <= 80f) // 科学家 25% (55+25=80)
-                return RoleTypeId.Scientist;
-
-            return RoleTypeId.FacilityGuard; // 安保人员 20%
-        }
-
-        private string GetRoleName(RoleTypeId role)
-        {
-            switch (role)
+            // Stop coroutine when player dies
+            if (_weaponCheckCoroutines.ContainsKey(ev.Player))
             {
-                case RoleTypeId.ClassD: return "D级人员";
-                case RoleTypeId.Scientist: return "科学家";
-                case RoleTypeId.FacilityGuard: return "安保人员";
-                default: return role.ToString();
+                Timing.KillCoroutines(_weaponCheckCoroutines[ev.Player]);
+                _weaponCheckCoroutines.Remove(ev.Player);
             }
         }
 
-        private ZoneType GetZoneByRole(RoleTypeId role)
+        private void OnUsingItem(UsingItemEventArgs ev)
         {
-            switch (role)
+            // Check if SCP-049-2 is using disguise item
+            if (ev.Player.Role != RoleTypeId.Scp0492 ||
+                ev.Item.Type != Config.DisguiseItem)
+                return;
+
+            // Check cooldown
+            if (_disguiseCooldown.TryGetValue(ev.Player, out var lastUse) &&
+                (DateTime.Now - lastUse).TotalSeconds < Config.DisguiseCooldown)
             {
-                case RoleTypeId.FacilityGuard:
-                    return ZoneType.HeavyContainment;
-                default:
-                    return ZoneType.LightContainment;
+                ev.Player.ShowHint($"<color=red>Disguise ability cooling down! Remaining time: {(int)(Config.DisguiseCooldown - (DateTime.Now - lastUse).TotalSeconds)} seconds</color>", 5f);
+                ev.IsAllowed = false;
+                return;
             }
+
+            // Trigger disguise effect
+            ev.IsAllowed = true;
+            _disguiseCooldown[ev.Player] = DateTime.Now;
+
+            // Start disguise coroutine
+            Timing.RunCoroutine(ApplyDisguise(ev.Player));
+
+            if (Config.Debug)
+                Log.Debug($"{ev.Player.Nickname} activated disguise ability");
         }
 
-        private Room GetRandomRoomInZone(ZoneType zone)
+        private IEnumerator<float> ApplyDisguise(Player player)
         {
-            try
+            // Save original custom info
+            if (!_originalCustomInfo.ContainsKey(player))
             {
-                var validRooms = Room.List
-                    .Where(room => room.Zone == zone && room.Type != RoomType.Unknown)
-                    .ToList();
-
-                return validRooms.Count > 0
-                    ? validRooms[UnityEngine.Random.Range(0, validRooms.Count)]
-                    : Room.List.FirstOrDefault();
+                _originalCustomInfo[player] = player.CustomInfo;
             }
-            catch
+
+            // Apply disguise effect
+            player.CustomInfo = "Class-D Personnel";
+            player.ShowHint("<color=yellow>You are now disguised as Class-D!\nUse item to cancel disguise</color>", Config.DisplayDuration);
+
+            // Broadcast notification
+            BroadcastMessage($"<color=yellow>SCP-049-2 {player.Nickname} disguised as human!</color>");
+
+            // Wait for disguise cancellation
+            bool disguiseActive = true;
+            DateTime startTime = DateTime.Now;
+
+            while (disguiseActive && player.IsAlive)
             {
-                return Room.List.FirstOrDefault();
-            }
-        }
-
-        private string GetChineseRoomName(RoomType roomType)
-        {
-            return _chineseRoomNames.TryGetValue(roomType, out string name) ? name : roomType.ToString();
-        }
-
-        private IEnumerator<float> CountdownCoroutine()
-        {
-            while (_remainingTime > 0 && _isStabilizerActive)
-            {
-                int currentSecond = Mathf.FloorToInt(_remainingTime);
-
-                // 每20秒广播一次（排除最后10秒）
-                if (currentSecond % 20 == 0 && currentSecond > 10 && currentSecond != _lastBroadcastSecond)
+                // Check if time expired
+                if ((DateTime.Now - startTime).TotalSeconds >= Config.DisguiseDuration)
                 {
-                    _lastBroadcastSecond = currentSecond;
-                    ShowGlobalHint(
-                        $"<size=25><color=#3498DB>现实稳定剩余: <color=#2E86C1>{currentSecond}秒</color></color></size>",
-                        2f
-                    );
-                }
-                // 最后10秒每秒广播
-                else if (currentSecond <= 10)
-                {
-                    string color = currentSecond > 5 ? "#F1C40F" : "#E74C3C";
-
-                    ShowGlobalHint(
-                        $"<size=30><color=#F39C12>■ <color={color}>警告</color> ■</color></size>\n" +
-                        $"<size=25><color=#F5B041>稳定系统即将失效: <color={color}>{currentSecond}秒</color></color></size>\n" +
-                        $"<size=25><color=#F9E79F>准备应对现实重构事件</color></size>",
-                        1f
-                    );
+                    disguiseActive = false;
                 }
 
-                yield return Timing.WaitForSeconds(1f);
-                _remainingTime -= 1f;
+                yield return Timing.WaitForOneFrame;
             }
 
-            _isStabilizerActive = false;
-
-            Timing.CallDelayed(1f, () =>
+            // Restore original state
+            if (player.IsAlive)
             {
-                string message =
-                    $"<size=30><color=#3498DB>■ <color=#2E86C1>系统通告</color> ■</color></size>\n" +
-                    $"<size=25><color=#85C1E9>艾普西龙现实稳定系统已停用</color></size>\n" +
-                    $"<size=25><color=#F1C40F>现实基准线恢复正常参数</color></size>\n" +
-                    $"<size=25><color=#AAB7B8>恢复标准操作流程</color></size>";
+                player.CustomInfo = _originalCustomInfo[player];
+                player.ShowHint("<color=red>Your disguise has ended!</color>", 5f);
 
-                ShowGlobalHint(message, 10f);
-            });
+                // Re-give disguise item
+                if (!player.Items.Any(item => item.Type == Config.DisguiseItem))
+                {
+                    player.AddItem(Config.DisguiseItem);
+                    if (Config.Debug)
+                        player.ShowHint($"<color=green>Disguise item regained</color>", 3f);
+                }
+            }
         }
 
-        private void ShowGlobalHint(string message, float duration)
+        private void OnAttacking(AttackingEventArgs ev)
         {
+            // Allow SCP-049-2 to pick up items
+            if (ev.Player.Role == RoleTypeId.Scp0492)
+            {
+                ev.IsAllowed = true;
+            }
+        }
+
+        private void OnDying(DyingEventArgs ev)
+        {
+            if (ev.Attacker == null || ev.Player == ev.Attacker)
+                return;
+
+            // SCP-049-2 kills human
+            if (ev.Attacker.Role == RoleTypeId.Scp0492 &&
+                ev.Player.Role.Team != Team.SCPs)
+            {
+                ev.IsAllowed = false;
+
+                // Broadcast message
+                BroadcastMessage(
+                    $"<color=red>{ev.Player.Nickname} was infected by zombie!</color>"
+                );
+
+                // Convert human to SCP-049-2
+                ev.Player.Role.Set(RoleTypeId.Scp0492, SpawnReason.Revived);
+
+                Timing.RunCoroutine(EquipZombieItems(ev.Player));
+
+                // Start weapon check
+                StartWeaponCheck(ev.Player);
+            }
+        }
+
+        private void OnHurting(HurtingEventArgs ev)
+        {
+            if (ev.Attacker == null || ev.Player == ev.Attacker)
+                return;
+
+            // SCP-049-2 shooting SCP-049
+            if (ev.Attacker.Role == RoleTypeId.Scp0492 &&
+                ev.Player.Role == RoleTypeId.Scp049)
+            {
+                ev.IsAllowed = false;
+
+                // Increase SCP-049 max health
+                ev.Player.MaxHealth += Config.HealHpIncrease;
+                ev.Player.Health = Math.Min(ev.Player.Health + Config.HealAmount, ev.Player.MaxHealth);
+
+                // Broadcast message
+                BroadcastMessage(
+                    $"<color=green>SCP-049 was healed by zombie!" +
+                    $"\nHealth: +{Config.HealAmount}, Max Health: +{Config.HealHpIncrease}</color>"
+                );
+
+                // Private hint for SCP-049-2
+                ev.Attacker.ShowHint(
+                    $"<color=yellow>You healed SCP-049!</color>",
+                    Config.DisplayDuration
+                );
+            }
+        }
+
+        private void BroadcastMessage(string content)
+        {
+            string formattedMessage = $"{new string('\n', Config.TopLines)}<align=center><b>{content}</b></align>";
+
             foreach (Player player in Player.List)
-                player.ShowHint(message, duration);
+            {
+                player.ShowHint(formattedMessage, Config.DisplayDuration);
+            }
         }
-    }
-
-    public class Config : IConfig
-    {
-        [Description("是否启用现实稳定系统")]
-        public bool IsEnabled { get; set; } = true;
-
-        [Description("稳定系统初始持续时间最小值 (秒)")]
-        public float MinInitialDuration { get; set; } = 190f;
-
-        [Description("稳定系统初始持续时间最大值 (秒)")]
-        public float MaxInitialDuration { get; set; } = 280f;
-
-        [Description("是否显示时空扰动通知")]
-        public bool ShowDamageNotifications { get; set; } = true;
-
-        [Description("是否显示人事调整通知")]
-        public bool ShowRespawnNotifications { get; set; } = true;
-
-        [Description("调试模式")]
-        public bool Debug { get; set; } = false;
     }
 }
